@@ -7,6 +7,7 @@ from os import getcwd, makedirs, walk
 from os.path import getmtime, isdir, isfile, join
 from shutil import rmtree
 from time import time
+from imp import load_source
 
 import click
 
@@ -20,6 +21,7 @@ from platformio.platforms.base import PlatformFactory
 
 @click.command("run", short_help="Process project environments")
 @click.option("--environment", "-e", multiple=True, metavar="<environment>")
+@click.option("--plugin", metavar="<plugin>")
 @click.option("--target", "-t", multiple=True, metavar="<target>")
 @click.option("--upload-port", metavar="<upload port>")
 @click.option("--project-dir", default=getcwd,
@@ -27,7 +29,7 @@ from platformio.platforms.base import PlatformFactory
                               writable=True, resolve_path=True))
 @click.option("--verbose", "-v", count=True, default=3)
 @click.pass_context
-def cli(ctx, environment, target, upload_port,  # pylint: disable=R0913,R0914
+def cli(ctx, environment, plugin, target, upload_port,  # pylint: disable=R0913,R0914
         project_dir, verbose):
     with util.cd(project_dir):
         config = util.get_project_config()
@@ -41,6 +43,11 @@ def cli(ctx, environment, target, upload_port,  # pylint: disable=R0913,R0914
 
         # clean obsolete .pioenvs dir
         _clean_pioenvs_dir()
+
+        plugin_module = None
+        if plugin:
+            # Load the indicated plugin file
+            plugin_module = load_source('plugin', plugin)
 
         results = []
         for section in config.sections():
@@ -64,7 +71,7 @@ def cli(ctx, environment, target, upload_port,  # pylint: disable=R0913,R0914
                 options[k] = v
 
             ep = EnvironmentProcessor(
-                ctx, envname, options, target, upload_port, verbose)
+                ctx, envname, options, target, upload_port, plugin_module, verbose)
             results.append(ep.process())
 
         if not all(results):
@@ -74,13 +81,14 @@ def cli(ctx, environment, target, upload_port,  # pylint: disable=R0913,R0914
 class EnvironmentProcessor(object):
 
     def __init__(self, cmd_ctx, name, options,  # pylint: disable=R0913
-                 targets, upload_port, verbose):
+                 targets, upload_port, plugin_module, verbose):
         self.cmd_ctx = cmd_ctx
         self.name = name
         self.options = options
         self.targets = targets
         self.upload_port = upload_port
         self.verbose_level = int(verbose)
+        self.plugin_module = plugin_module
 
     def process(self):
         terminal_width, _ = click.get_terminal_size()
@@ -143,7 +151,12 @@ class EnvironmentProcessor(object):
             _autoinstall_libs(self.cmd_ctx, self.options['install_libs'])
 
         p = PlatformFactory.newPlatform(platform)
-        return p.run(build_vars, build_targets, self.verbose_level)
+        if self.plugin_module:
+            self.plugin_module.pre_run(self, p)
+        result = p.run(build_vars, build_targets, self.verbose_level)
+        if self.plugin_module:
+            self.plugin_module.post_run(self, p, result)
+        return result
 
 
 def _autoinstall_platform(ctx, platform):
